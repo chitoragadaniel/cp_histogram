@@ -100,27 +100,29 @@ Don't forget to compile using the right flag - e.g., -fopenmp for gcc
     gettimeofday(&before, NULL);
     
     // Declare the locks
-    omp_lock_t locks[3];
+    omp_lock_t locks[HIST_SIZE*3];
     
     // Initialize the locks
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < HIST_SIZE*3; ++i) {
         omp_init_lock(&locks[i]);
     }
 
     // Parallelize the calculation using atomic operations
     #pragma omp parallel for
-    for (int i = 0; i < img_size; i++) {
-        unsigned int tmp = img[i];
-        #pragma omp atomic
-        hist->R[tmp & 0x00FF0000 >> 16]++;
-        #pragma omp atomic
-        hist->G[tmp & 0x0000FF00 >> 8]++;
-        #pragma omp atomic
-        hist->B[tmp & 0x000000FF]++;
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            unsigned int tmp = img[i*width+j];
+            #pragma omp atomic
+            hist->R[tmp & 0x00FF0000 >> 16]++;
+            #pragma omp atomic
+            hist->G[tmp & 0x0000FF00 >> 8]++;
+            #pragma omp atomic
+            hist->B[tmp & 0x000000FF]++;
+        }
     }
     
     // Destroy the locks
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < HIST_SIZE*3; ++i) {
         omp_destroy_lock(&locks[i]);
     }
 

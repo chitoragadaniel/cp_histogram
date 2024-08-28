@@ -1,4 +1,7 @@
+#define STB_IMAGE_IMPLEMENTATION
 #include <stdio.h>
+#include "stb_image.h"
+#include <math.h>
 #ifdef __APPLE__
 #  include "OpenCL/opencl.h"
 #else
@@ -112,12 +115,52 @@ thread should process Mn elements.
 */
 const char* kernelString = KERNEL(
 __kernel void histogram_v1(const int height, const int width, const __global unsigned int* img, __global unsigned int* hist) {
-   int index = get_global_id (0);
-   if (index < height*width) {
-     unsigned int tmp = img[index] & 0x00ff0000;
-     hist[tmp >> 16]++;
-     
-   }
+    // Local histogram shared by the work-group
+    __local unsigned int localHist[256 * 3];
+
+    int histSize = 256;
+    int localSize = get_local_size(0);
+    int globalSize = get_global_size(0);
+    int index = get_global_id (0);
+    int id = get_local_id(0);
+    
+    // Initialize the local histogram
+    for (int i = id; i < histSize * 3; i += localSize) {
+            localHist[i] = 0;
+        }
+
+    // Synchronize to make sure the local histogram is initialized
+    barrier(CLK_LOCAL_MEM_FENCE);
+
+    // Process the pixels assigned to this work-group
+    for (int i = index; i < width*height; i += globalSize) {
+        unsigned int tmp = img[i]; 
+        atomic_inc(&localHist[tmp & 0x00FF0000 >> 16]);
+        atomic_inc(&localHist[histSize+tmp & 0x0000FF00 >> 8]);
+        atomic_inc(&localHist[histSize*2+tmp & 0x000000FF]);
+    }
+
+    // Synchronize to make sure all work-items have updated the local histogram    
+    barrier(CLK_LOCAL_MEM_FENCE);
+    
+    if (id == 0 ) {
+        for (int i = 0; i < histSize * 3; i++) {
+            atomic_add(&hist[i], localHist[i]);
+        }
+    }
+    
+}
+
+__kernel void histogram_v2(const int height, const int width, const __global unsigned int* img, __global unsigned int* hist) {
+    int index = get_global_id(0);
+    int histSize = 256;
+
+    // Process the pixels assigned to this thread
+    unsigned int tmp = img[index]; 
+    atomic_inc(&hist[tmp & 0x00FF0000 >> 16]);
+    atomic_inc(&hist[histSize+tmp & 0x0000FF00 >> 8]);
+    atomic_inc(&hist[histSize*2+tmp & 0x000000FF]);
+    
 }
 );
 
@@ -161,15 +204,57 @@ void prepare() {
     atexit(unprepare);
 }
 
+/*
+Returns an array containing the pixel colours of the image; 
+3rd byte is RED, 2nd byte is BLUE and 1st byte is GREEN. 
+The count of bytes starts with the least significant byte.
+*/
+unsigned int* load_img_to_array(const char* filename, int* width, int* height) {
+    int channels;
+    unsigned char* img = stbi_load(filename, width, height, &channels, 3); // 3 channels for RGB
+    if (!img) {
+        fprintf(stderr, "Error loading image: %s\n", stbi_failure_reason());
+        return NULL;
+    }
+
+    int imgSize = (*width) * (*height);
+    int* imageArray = (int*)malloc(imgSize * sizeof(int));
+    if (!imageArray) {
+        perror("Error allocating memory");
+        stbi_image_free(img);
+        return NULL;
+    }
+
+    for (int i = 0; i < imgSize; i++) {
+        int index = i * 3;
+        imageArray[i] = (img[index] << 16) | (img[index + 1] << 8) | img[index + 2];
+    }
+
+    stbi_image_free(img);
+    return imageArray;
+}
 
 void impl_hist_ver1_opencl( unsigned int width, unsigned int height, Image img, Histogram hist) {
 
     cl_int err = CL_SUCCESS;
     cl_event event = NULL;
 
+    struct timeval before, after;
+    double time = 0.0;
+    
+    gettimeofday(&before, NULL);  
+
+    // Initiliazie the histogram
+    for (int i = 0; i < HIST_SIZE * 3; i++) {
+        hist[i] = 0;
+    }
+
     // Prepare program
     prepare();
 
+    size_t local[1] = {256};
+    size_t global[1] = {height};
+    
     // Prepare OpenCL memory objects
     cl_mem bufImg = clCreateBuffer(context, CL_MEM_READ_ONLY, height*width*sizeof(unsigned int), NULL, NULL);
     if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
@@ -194,9 +279,6 @@ void impl_hist_ver1_opencl( unsigned int width, unsigned int height, Image img, 
     if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
     err = clSetKernelArg(kernel, 3, sizeof(cl_mem), (void*)&bufHist);
 
-
-    size_t local[1] = {512};
-    size_t global[1] = {height*width};
     // Call the opencl kernel for every row of the M matrix
     err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL,
                                  global, NULL, 0, NULL, &event);
@@ -209,6 +291,15 @@ void impl_hist_ver1_opencl( unsigned int width, unsigned int height, Image img, 
     err = clWaitForEvents(1, &event);
     if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
 
+    gettimeofday(&after, NULL);
+
+    time = (double)(after.tv_sec - before.tv_sec) +
+        (double)(after.tv_usec - before.tv_usec) / 1e6;
+
+#ifdef TIMING    
+    printf("Kernel took: %.6f seconds.\n", time);
+#endif
+
     // Free the OpenCL memory objects
     clReleaseMemObject(bufImg);
     clReleaseMemObject(bufHist);
@@ -216,6 +307,77 @@ void impl_hist_ver1_opencl( unsigned int width, unsigned int height, Image img, 
     clReleaseKernel(kernel);
 }
 
+void impl_hist_ver2_opencl( unsigned int width, unsigned int height, Image img, Histogram hist) {
+
+    cl_int err = CL_SUCCESS;
+    cl_event event = NULL;
+
+    struct timeval before, after;
+    double time = 0.0;
+    
+    gettimeofday(&before, NULL);
+    
+    // Initiliazie the histogram
+    for (int i = 0; i < HIST_SIZE * 3; i++) {
+        hist[i] = 0;
+    }
+
+    // Prepare program
+    prepare();
+
+    size_t global[1] = {height*width};
+
+    // Prepare OpenCL memory objects
+    cl_mem bufImg = clCreateBuffer(context, CL_MEM_READ_ONLY, height*width*sizeof(unsigned int), NULL, NULL);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+    cl_mem bufHist = clCreateBuffer(context, CL_MEM_READ_WRITE, HIST_SIZE * 3 * sizeof(unsigned int), NULL, NULL);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+
+    // Copy matrices to the GPU
+    clEnqueueWriteBuffer(queue, bufImg, CL_TRUE, 0, width*height*sizeof(unsigned int), img, 0, NULL, NULL);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+
+    clEnqueueWriteBuffer(queue, bufHist, CL_TRUE, 0, HIST_SIZE * 3 * sizeof(unsigned int), hist, 0, NULL, NULL);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+
+    // Setup call to the opencl kernel
+    cl_kernel kernel = clCreateKernel(program, "histogram_v2", &err);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+    err = clSetKernelArg(kernel, 0, sizeof(unsigned int), (void*)&width);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+    err = clSetKernelArg(kernel, 1, sizeof(unsigned int), (void*)&height);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+    err = clSetKernelArg(kernel, 2, sizeof(cl_mem), (void*)&bufImg);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+    err = clSetKernelArg(kernel, 3, sizeof(cl_mem), (void*)&bufHist);
+
+    // Call the opencl kernel for every row of the M matrix
+    err = clEnqueueNDRangeKernel(queue, kernel, 1, NULL,
+                                 global, NULL, 0, NULL, &event);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+    err = clWaitForEvents(1, &event);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+
+    // Copy back the resulting C matrix to host memory
+    clEnqueueReadBuffer(queue, bufHist, CL_TRUE, 0, HIST_SIZE * 3 * sizeof(unsigned int), hist, 0, NULL, &event);
+    err = clWaitForEvents(1, &event);
+    if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
+
+    gettimeofday(&after, NULL);
+
+    time = (double)(after.tv_sec - before.tv_sec) +
+        (double)(after.tv_usec - before.tv_usec) / 1e6;
+
+#ifdef TIMING    
+    printf("Kernel took: %.6f seconds.\n", time);
+#endif
+
+    // Free the OpenCL memory objects
+    clReleaseMemObject(bufImg);
+    clReleaseMemObject(bufHist);
+
+    clReleaseKernel(kernel);
+}
 
 int image_gen(int width, int height, Image img) {
   int i, img_size=width*height;
@@ -233,14 +395,14 @@ int impl_hist_ver0_seq(int width, int height, Image img, Histogram hist) {
     struct timeval before, after;
     double time = 0.0;
     
+    gettimeofday(&before, NULL);
+    
     /* Initialize bins. */
     for (i = 0; i < HIST_SIZE; i++) {
         hist[i] = 0;
         hist[HIST_SIZE+i] = 0;
         hist[HIST_SIZE*2+i] = 0;
     } 
-
-    gettimeofday(&before, NULL);
 
     for (i = 0; i < img_size; i++) {
       unsigned int tmp = img[i];
@@ -261,7 +423,7 @@ int impl_hist_ver0_seq(int width, int height, Image img, Histogram hist) {
     return 0;
 }
 
-int histDiff(Histogram h1, Histogram h2) {
+int hist_diff(Histogram h1, Histogram h2) {
     int i;
     unsigned int diffR = 0, diffG=0, diffB=0;  
     for (i=0; i<HIST_SIZE; i++) {
@@ -270,15 +432,14 @@ int histDiff(Histogram h1, Histogram h2) {
         diffB+=(h1[HIST_SIZE*2+i] != h2[HIST_SIZE*2+i]);   
     }  
 #ifdef VERBOSE
-    printf("Error in the R channel: %u \n", diffR);
-    printf("Error in the G channel: %u \n", diffG);
-    printf("Error in the B channel: %u \n", diffB); 
+    if (diffR != 0) {printf("Error in the R channel: %u \n", diffR);}
+    if (diffR != 0) {printf("Error in the G channel: %u \n", diffG);}
+    if (diffR != 0) {printf("Error in the B channel: %u \n", diffB);}
 #endif
     return (diffR!=0 || diffG!=0 || diffB !=0);
 }
 
-int main(int argc, char* argv[]) {
-    int width = 10000, height = 10000;
+void calc_gen_img_histogram(int width, int height) {
     Image img = (unsigned int *)malloc(height*width * sizeof(unsigned int)); 
     Histogram _v0_Hist, _v1_Hist, _v2_Hist;
 
@@ -286,18 +447,58 @@ int main(int argc, char* argv[]) {
     
     _v0_Hist = (unsigned int*)malloc(HIST_SIZE*3*sizeof(unsigned int));
     _v1_Hist = (unsigned int*)malloc(HIST_SIZE*3*sizeof(unsigned int));  
- 
+    _v2_Hist = (unsigned int*)malloc(HIST_SIZE*3*sizeof(unsigned int));  
+
     image_gen(width, height, img); 
     impl_hist_ver0_seq(width, height, img, _v0_Hist);
     impl_hist_ver1_opencl(width, height, img, _v1_Hist);
-//    impl_hist_ver2_opencl(width, height, img, &_v2_Hist);
-     
-    if (histDiff(_v0_Hist, _v1_Hist)) printf("Error in histogram -- chech ver1! \n");
-//    if (histDiff(_v0_Hist, _v2_Hist)) printf("Error in histogram -- chech ver2! \n");
+    impl_hist_ver2_opencl(width, height, img, _v2_Hist);
 
-    printf("All done ... \n");
+    if (hist_diff(_v0_Hist, _v1_Hist)) printf("Error in histogram -- chech ver1! \n");
+    if (hist_diff(_v0_Hist, _v2_Hist)) printf("Error in histogram -- chech ver2! \n");
+
    
     free(img);
     free(_v0_Hist);
     free(_v1_Hist);
+    free(_v2_Hist);
+    printf("\n");
+}
+
+void calc_img_histogram(const char* filename, int width, int height) {
+    // Load image
+    Image img = load_img_to_array(filename, &width, &height);
+    
+    // Define histograms
+    Histogram _v0_Hist, _v1_Hist, _v2_Hist;
+
+    printf("Input %s; Width: %d, Height: %d\n", filename, width, height);
+
+    // Check each implementation 
+    _v0_Hist = (unsigned int*)malloc(HIST_SIZE*3*sizeof(unsigned int));
+    _v1_Hist = (unsigned int*)malloc(HIST_SIZE*3*sizeof(unsigned int));  
+    _v2_Hist = (unsigned int*)malloc(HIST_SIZE*3*sizeof(unsigned int));  
+ 
+    impl_hist_ver0_seq(width, height, img, _v0_Hist);
+    impl_hist_ver1_opencl(width, height, img, _v1_Hist);
+    impl_hist_ver2_opencl(width, height, img, _v2_Hist);
+    
+    if (hist_diff(_v0_Hist, _v1_Hist)) printf("Error in histogram -- chech ver1! \n");
+    if (hist_diff(_v0_Hist, _v2_Hist)) printf("Error in histogram -- chech ver2! \n"); 
+
+    free(img);
+    free(_v0_Hist);
+    free(_v1_Hist);
+    free(_v2_Hist);
+    printf("\n");
+}
+
+// gcc -o ocl_histogram_RGB ocl_histogram_RGB.c -lOpenCL -Wno-deprecated-declarations -Wno-implicit-function-declaration -lm
+// ./ocl_histogram_RGB
+
+int main(int argc, char* argv[]) {
+    calc_gen_img_histogram(10000, 10000);
+    calc_img_histogram("img_1.jpeg",1280, 720);
+    calc_img_histogram("img_2.jpeg",1920, 1080);
+    printf("All done ... \n");
 }
