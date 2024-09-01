@@ -34,6 +34,26 @@ fn image_to_rgb_array(image_path: &str) -> Vec<u32> {
     rgb_array
 }
 
+fn generate_rgb_array(width: u32, height: u32) -> Vec<u32> {
+    // Create a vector to hold the RGB values as 3-byte values
+    let mut rgb_array = Vec::with_capacity((width * height) as usize);
+
+    // Generate RGB values based on iteration index
+    for i in 0..(width * height) {
+        let r = ((i >> 16) & 0xFF) as u32; // Red component based on higher bits of i
+        let g = ((i >> 8) & 0xFF) as u32;  // Green component based on middle bits of i
+        let b = (i & 0xFF) as u32;         // Blue component based on lower bits of i
+
+        // Combine RGB into a single 32-bit value, where the least significant byte is Blue,
+        // the second least significant byte is Green, and the third least significant byte is Red
+        let rgb_value = (r << 16) | (g << 8) | b;
+        rgb_array.push(rgb_value);
+    }
+
+    rgb_array
+}
+
+
 fn hist_diff(h1: &Histogram, h2: &Histogram) -> bool {
     let mut diff_r = 0;
     let mut diff_g = 0;
@@ -189,10 +209,17 @@ fn impl_hist_ver2(image_data: &[u32], num_threads: usize) -> Histogram {
     global_histogram
 }
 
-fn main() {
-    let image_path = "../img_3.jpg";
+fn calc_img_histogram(image_path: &str) {
     let rgb_array = image_to_rgb_array(image_path);
     
+    // Load the image
+    let img = image::open(image_path).expect("Failed to open image");
+
+    // Get image dimensions
+    let (width, height) = img.dimensions();
+
+    println!("Input: {:?}; Width: {:?}, Height: {:?}", image_path, width, height);
+
     let mut start = Instant::now();
     let hist_seq = impl_hist_seq(&rgb_array);
     let mut elapsed = start.elapsed();
@@ -210,4 +237,35 @@ fn main() {
 
     if hist_diff(&hist_seq, &hist_ver1) {println!("Error in histogram -- chech ver1!")};
     if hist_diff(&hist_seq, &hist_ver2) {println!("Error in histogram -- chech ver2!")};
+    println!();
+}
+
+fn calc_gen_img_histogram(height: u32, width: u32) {
+    let rgb_array = generate_rgb_array(height, width);
+    println!("Input generated image; Width: {:?}, Height: {:?}", width, height);
+
+    let mut start = Instant::now();
+    let hist_seq = impl_hist_seq(&rgb_array);
+    let mut elapsed = start.elapsed();
+    println!("Kernel took: {:?}s", elapsed);
+
+    start = Instant::now();
+    let hist_ver1 = impl_hist_ver1(&rgb_array, 10);
+    elapsed = start.elapsed();
+    println!("Kernel took: {:?}s", elapsed);
+
+    start = Instant::now();
+    let hist_ver2 = impl_hist_ver2(&rgb_array, 10); // Tested on 720p, 1080p and 4k images and overall at 10 threads the performances peaks
+    elapsed = start.elapsed();
+    println!("Kernel took: {:?}s", elapsed);
+
+    if hist_diff(&hist_seq, &hist_ver1) {println!("Error in histogram -- chech ver1!")};
+    if hist_diff(&hist_seq, &hist_ver2) {println!("Error in histogram -- chech ver2!")};
+    println!();
+}
+
+fn main() {
+    calc_img_histogram("../img_1.jpeg");
+    calc_img_histogram("../img_2.jpeg");
+    calc_gen_img_histogram(10000, 10000);
 }

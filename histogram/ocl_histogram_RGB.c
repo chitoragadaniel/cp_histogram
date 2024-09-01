@@ -115,6 +115,18 @@ thread should process Mn elements.
 */
 const char* kernelString = KERNEL(
 __kernel void histogram_v1(const int height, const int width, const __global unsigned int* img, __global unsigned int* hist) {
+    int index = get_global_id(0);
+    int histSize = 256;
+
+    // Process the pixels assigned to this thread
+    unsigned int tmp = img[index]; 
+    atomic_inc(&hist[tmp & 0x00FF0000 >> 16]);
+    atomic_inc(&hist[histSize+tmp & 0x0000FF00 >> 8]);
+    atomic_inc(&hist[histSize*2+tmp & 0x000000FF]);
+    
+}
+
+__kernel void histogram_v2(const int height, const int width, const __global unsigned int* img, __global unsigned int* hist) {
     // Local histogram shared by the work-group
     __local unsigned int localHist[256 * 3];
 
@@ -148,18 +160,6 @@ __kernel void histogram_v1(const int height, const int width, const __global uns
             atomic_add(&hist[i], localHist[i]);
         }
     }
-    
-}
-
-__kernel void histogram_v2(const int height, const int width, const __global unsigned int* img, __global unsigned int* hist) {
-    int index = get_global_id(0);
-    int histSize = 256;
-
-    // Process the pixels assigned to this thread
-    unsigned int tmp = img[index]; 
-    atomic_inc(&hist[tmp & 0x00FF0000 >> 16]);
-    atomic_inc(&hist[histSize+tmp & 0x0000FF00 >> 8]);
-    atomic_inc(&hist[histSize*2+tmp & 0x000000FF]);
     
 }
 );
@@ -233,7 +233,6 @@ unsigned int* load_img_to_array(const char* filename, int* width, int* height) {
     stbi_image_free(img);
     return imageArray;
 }
-
 void impl_hist_ver1_opencl( unsigned int width, unsigned int height, Image img, Histogram hist) {
 
     cl_int err = CL_SUCCESS;
@@ -242,8 +241,8 @@ void impl_hist_ver1_opencl( unsigned int width, unsigned int height, Image img, 
     struct timeval before, after;
     double time = 0.0;
     
-    gettimeofday(&before, NULL);  
-
+    gettimeofday(&before, NULL);
+    
     // Initiliazie the histogram
     for (int i = 0; i < HIST_SIZE * 3; i++) {
         hist[i] = 0;
@@ -252,9 +251,8 @@ void impl_hist_ver1_opencl( unsigned int width, unsigned int height, Image img, 
     // Prepare program
     prepare();
 
-    size_t local[1] = {256};
-    size_t global[1] = {height};
-    
+    size_t global[1] = {height*width};
+
     // Prepare OpenCL memory objects
     cl_mem bufImg = clCreateBuffer(context, CL_MEM_READ_ONLY, height*width*sizeof(unsigned int), NULL, NULL);
     if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
@@ -315,8 +313,8 @@ void impl_hist_ver2_opencl( unsigned int width, unsigned int height, Image img, 
     struct timeval before, after;
     double time = 0.0;
     
-    gettimeofday(&before, NULL);
-    
+    gettimeofday(&before, NULL);  
+
     // Initiliazie the histogram
     for (int i = 0; i < HIST_SIZE * 3; i++) {
         hist[i] = 0;
@@ -325,8 +323,9 @@ void impl_hist_ver2_opencl( unsigned int width, unsigned int height, Image img, 
     // Prepare program
     prepare();
 
-    size_t global[1] = {height*width};
-
+    size_t local[1] = {256};
+    size_t global[1] = {height};
+    
     // Prepare OpenCL memory objects
     cl_mem bufImg = clCreateBuffer(context, CL_MEM_READ_ONLY, height*width*sizeof(unsigned int), NULL, NULL);
     if(err != CL_SUCCESS)    printf("%i: %s\n", __LINE__, getErrorString(err));
@@ -497,8 +496,8 @@ void calc_img_histogram(const char* filename, int width, int height) {
 // ./ocl_histogram_RGB
 
 int main(int argc, char* argv[]) {
-    calc_gen_img_histogram(10000, 10000);
     calc_img_histogram("img_1.jpeg",1280, 720);
     calc_img_histogram("img_2.jpeg",1920, 1080);
+    calc_gen_img_histogram(10000, 10000);
     printf("All done ... \n");
 }

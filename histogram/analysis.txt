@@ -1,0 +1,36 @@
+All the tests were run on the provided VM.
+
+Performance Table
+Language    Image	    Dimensions	    Sequential (s)	With Synchronization (s)	Replication & Reduction (s)
+Rust	    img_1.jpeg	1280 x 720	    0.0079	        0.0435	                    0.0077
+Rust	    img_2.jpeg	1920 x 1080	    0.0149	        0.1344	                    0.0152
+Rust	    Generated	10000 x 10000	0.7312	        3.8471	                    0.3492
+
+OpenMP	    img_1.jpeg	1280 x 720	    0.0022	        0.0110	                    0.0005
+OpenMP	    img_2.jpeg	1920 x 1080	    0.0050	        0.0201	                    0.0063
+OpenMP	    Generated	10000 x 10000	0.2100	        2.2528	                    0.0437
+
+OpenCL	    img_1.jpeg	1280 x 720	    0.0022	        0.3146	                    0.0040
+OpenCL	    img_2.jpeg	1920 x 1080	    0.0045	        0.0258	                    0.0091
+OpenCL	    Generated	10000 x 10000	0.2063	        1.5358	                    0.3916
+
+Analysis
+1. Rust Performance
+    Sequential Performance: Rust's performance is solid in the sequential implementations, particularly for smaller images. The execution times scale predictably with image size, though Rust tends to be slower compared to the baseline C performance used in OpenMP and OpenCL.
+    With Synchronization: Introducing synchronization in Rust leads to a significant increase in computation time, particularly for larger images. For example, the time taken for the generated 10000x10000 image increases by more than five times compared to the sequential version.
+    Replication & Reduction: This approach effectively reduces the overhead introduced by synchronization, making it closer to the sequential execution times. This method is particularly beneficial for large images.
+
+2. OpenMP Performance
+    Sequential Performance: The sequential performance of OpenMP is based on pure C code, which is highly efficient. This serves as the baseline for parallel performance and demonstrates very fast execution times.
+    With Synchronization: The synchronization overhead in OpenMP is notable but still more efficient than Rust's equivalent. For instance, for the 10000x10000 image, synchronization takes about 10 times longer than the sequential case but remains faster than Rust's performance.
+    Replication & Reduction: OpenMP's replication and reduction strategy is extremely efficient, especially with smaller images. The method achieves significant speedups, sometimes nearly an order of magnitude faster than the sequential version.
+
+3. OpenCL Performance
+    Sequential Performance: The sequential performance for OpenCL is also based on the same C code used for OpenMP. The times are very close to OpenMP's sequential performance, showing the efficiency of the underlying C implementation.
+    With Synchronization: Synchronization introduces a significant overhead in OpenCL, particularly for smaller images, where it can be over 100 times slower than the sequential version. This overhead is more pronounced than in OpenMP.
+    Replication & Reduction: The replication and reduction approach in OpenCL strikes a balance between performance and synchronization overhead. It performs better than the synchronized version but generally has some overhead compared to the sequential execution. This approach should scale better with very large datasets.
+
+Conclusion:
+    OpenMP offers the best overall performance, especially for smaller images, where its parallelism and minimal overhead provide significant speedups. The replication and reduction strategy is particularly effective, offering dramatic performance improvements.
+    Rust provides a good balance between performance and memory safety, with competitive results in sequential and replication/reduction methods. However, Rust struggles with synchronization overhead, particularly for larger images.
+    OpenCL is effective for highly parallel tasks, especially with very large datasets. However, either with synchronization or with replication and reduction the overhead is too big for this size of the dataset. Moreover, because of the nature of the histogram, you can't assign a unit of the histogram per work item or even work group. Because of this, it is not possible to use take advantage of OpenCL.

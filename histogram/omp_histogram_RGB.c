@@ -98,14 +98,6 @@ Don't forget to compile using the right flag - e.g., -fopenmp for gcc
 
     // Start timer
     gettimeofday(&before, NULL);
-    
-    // Declare the locks
-    omp_lock_t locks[HIST_SIZE*3];
-    
-    // Initialize the locks
-    for (int i = 0; i < HIST_SIZE*3; ++i) {
-        omp_init_lock(&locks[i]);
-    }
 
     // Parallelize the calculation using atomic operations
     #pragma omp parallel for
@@ -119,11 +111,6 @@ Don't forget to compile using the right flag - e.g., -fopenmp for gcc
             #pragma omp atomic
             hist->B[tmp & 0x000000FF]++;
         }
-    }
-    
-    // Destroy the locks
-    for (int i = 0; i < HIST_SIZE*3; ++i) {
-        omp_destroy_lock(&locks[i]);
     }
 
     // Stop timer
@@ -315,7 +302,7 @@ void calc_gen_img_histogram(int width, int height) {
 
 
 // To compile the file, run the command:    gcc -fopenmp -o omp_histogram_RGB omp_histogram_RGB.c
-// To run the code, run the command:        omp_histogram_RGB.exe
+// To run the code, run the command:        ./omp_histogram_RGB
 
 int main(int argc, char* argv[]) {
     
